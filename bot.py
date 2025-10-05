@@ -4,6 +4,8 @@ import openrouter
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
+from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 
 logging.basicConfig(
@@ -25,18 +27,20 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        'This is a bot who can help you with access to Openrouter API'
+        'This is a bot who can help you with access to OpenRouter API\nDefault model is ***openai\\/gpt\\-5***\n'
+        'To see help use /help command',
+        parse_mode=ParseMode.MARKDOWN_V2
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
-    📖 **Command help:**
-    /start - start a bot
-    /reset - reset message history
-    /about - project information
-    /switch_model - switch to another Openrouter LLM
+    📖 ***Command help:***
+    /start \\- start a bot
+    /reset \\- reset message history
+    /about \\- project information
+    /switch\\_model \\- switch to another OpenRouter LLM
     """
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     openrouter.reset_history(update.effective_user.id)
@@ -50,14 +54,17 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def switch_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     current = openrouter.get_user_model(tg_id)
+    safe_model = escape_markdown(current, version=2)
     buttons = [
         [InlineKeyboardButton(m, callback_data=f"set_model:{m}")]
         for m in openrouter.AVAILABLE_MODELS
     ]
     markup = InlineKeyboardMarkup(buttons)
+    text = f"Your current model is ***{safe_model}***\nSelect another model:"
     await update.message.reply_text(
-        f"Your current model is {current}\nSelect another model:",
-        reply_markup=markup
+        text,
+        reply_markup=markup,
+        parse_mode=ParseMode.MARKDOWN_V2
     )
 
 async def set_model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -65,24 +72,31 @@ async def set_model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     _, model = query.data.split(":", 1)
     openrouter.set_user_model(query.from_user.id, model)
-    await query.edit_message_text(f"Model switched to {model}")
+    safe_model = escape_markdown(model, version=2)
+    await query.edit_message_text(
+        f"Model switched to ***{safe_model}***",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-
-    processing_msg = await update.message.reply_text("Openrouter is processing your request...")
+    processing_msg = await update.message.reply_text("OpenRouter is processing your request…")
 
     try:
-        response_text = await openrouter.get_response(user_text, update.message.from_user.id)
-        try:
-            await processing_msg.delete()
-        except Exception as e:
-            logging.warning("Error happened while deleting system message: %s", e)
+        response_text = await openrouter.get_response(user_text, update.effective_user.id)
+        await processing_msg.delete()
 
-        for i in range(0, len(response_text), MAX_MESSAGE_LENGTH):
-            part = response_text[i:i + MAX_MESSAGE_LENGTH]
-            await update.message.reply_text(part)
+        safe = escape_markdown(response_text, version=2)
+        safe = (
+            safe
+            .replace(r'\*\*', '***')
+            .replace(r'\_', '_')      # _курсив_
+            .replace(r'\`', '```')      # `код`
+        )
 
+        for i in range(0, len(safe), MAX_MESSAGE_LENGTH):
+            part = safe[i:i + MAX_MESSAGE_LENGTH]
+            await update.message.reply_text(part, parse_mode=ParseMode.MARKDOWN_V2)
 
     except TelegramError as e:
         logging.warning("Error happened while deleting system message: %s", e)

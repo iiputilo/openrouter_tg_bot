@@ -14,8 +14,14 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 USER_MAP_FILE = Path('user_map.json')
 MAX_HISTORY_MESSAGES = 15
-DEFAULT_MODEL_NAME = "gpt-3.5-turbo"
-AVAILABLE_MODELS = ["gpt-3.5-turbo", "anthropic/claude-sonnet-4.5"]
+DEFAULT_MODEL_NAME = "openai/gpt-5"
+AVAILABLE_MODELS = ["openai/gpt-5",
+                    "anthropic/claude-sonnet-4.5"]
+
+MODEL_PRICING = {
+    "openai/gpt-5": [1.25, 10],
+    "anthropic/claude-sonnet-4.5": [3, 15]
+}
 
 def _load_user_map() -> Dict[str, Any]:
     if not USER_MAP_FILE.exists():
@@ -79,9 +85,7 @@ def _trim_history(history: List[Dict[str, str]], max_messages: int) -> List[Dict
 
 async def get_response(user_text: str, tg_id: int) -> str:
     rec = _ensure_user_record(tg_id)
-    uid = rec["uid"]
     model = rec["model"]
-    logging.info(f'Сообщение от {uid}: {user_text}')
 
     rec["history"].append({"role": "user", "content": user_text})
     rec["history"] = _trim_history(rec["history"], MAX_HISTORY_MESSAGES)
@@ -102,9 +106,24 @@ async def get_response(user_text: str, tg_id: int) -> str:
         data = response.json()
 
     content = data["choices"][0]["message"]["content"]
+    usage = data.get("usage", {})
+
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0)
+    price_per_1m_input = MODEL_PRICING[model][0]
+    price_per_1m_output = MODEL_PRICING[model][1]
+
+    cost_input = prompt_tokens / 10**6 * price_per_1m_input
+    cost_output = completion_tokens / 10**6 * price_per_1m_output
+    total_cost = cost_input + cost_output
 
     rec["history"].append({"role": "assistant", "content": content})
     rec["history"] = _trim_history(rec["history"], MAX_HISTORY_MESSAGES)
     _save_user_map(user_map)
 
-    return content
+    return (
+        f"{content}\n\n---\n"
+        f"Input cost: ${cost_input:.6f}\n"
+        f"Output cost: ${cost_output:.6f}\n"
+        f"**Total cost: ${total_cost:.6f}**"
+    )
