@@ -1,5 +1,9 @@
 import os
 import logging
+import base64
+import tempfile
+from typing import List
+import re
 import openrouter
 from dotenv import load_dotenv
 from telegram.error import TelegramError
@@ -78,21 +82,55 @@ async def set_model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
+async def _file_to_data_uri(context: ContextTypes.DEFAULT_TYPE, file_id: str, mime: str) -> str:
+    tg_file = await context.bot.get_file(file_id)
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        await tg_file.download_to_drive(custom_path=tmp_path)
+        with open(tmp_path, 'rb') as f:
+            data = f.read()
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    b64 = base64.b64encode(data).decode('ascii')
+    return f"data:{mime};base64,{b64}"
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
+    user_text = (update.message.text or update.message.caption or "").strip()
+
+    image_uris: List[str] = []
+
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        try:
+            image_uris.append(await _file_to_data_uri(context, photo.file_id, "image/jpeg"))
+        except Exception as e:
+            logging.warning("Failed to process photo: %s", e)
+
+    if update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("image/"):
+        try:
+            mime = update.message.document.mime_type
+            image_uris.append(await _file_to_data_uri(context, update.message.document.file_id, mime))
+        except Exception as e:
+            logging.warning("Failed to process image document: %s", e)
+
     processing_msg = await update.message.reply_text("OpenRouter is processing your request…")
 
     try:
-        response_text = await openrouter.get_response(user_text, update.effective_user.id)
+        if not user_text and not image_uris:
+            await processing_msg.delete()
+            await update.message.reply_text("Attach an image or send a message.")
+            return
+
+        response_text = await openrouter.get_response(user_text if user_text else None, update.effective_user.id, image_uris or None)
         await processing_msg.delete()
 
         safe = escape_markdown(response_text, version=2)
-        safe = (
-            safe
-            .replace(r'\*\*', '***')
-            .replace(r'\_', '_')      # _курсив_
-            .replace(r'\`', '```')      # `код`
-        )
+        safe = re.sub(r'\\\*\\\*(.+?)\\\*\\\*', r'***\1***', safe, flags=re.S)
+        safe = safe.replace(r'\_', '_').replace(r'\`', '```')
 
         for i in range(0, len(safe), MAX_MESSAGE_LENGTH):
             part = safe[i:i + MAX_MESSAGE_LENGTH]
@@ -110,7 +148,8 @@ def main():
     app.add_handler(CommandHandler('switch_model', switch_model_command))
     app.add_handler(CommandHandler('reset', reset_command))
     app.add_handler(CallbackQueryHandler(set_model_callback, pattern=r"^set_model:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    message_filter = (filters.TEXT | filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND
+    app.add_handler(MessageHandler(message_filter, handle_message))
     app.add_error_handler(error_handler)
     app.run_polling()
 
