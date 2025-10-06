@@ -98,8 +98,72 @@ async def _file_to_data_uri(context: ContextTypes.DEFAULT_TYPE, file_id: str, mi
     b64 = base64.b64encode(data).decode('ascii')
     return f"data:{mime};base64,{b64}"
 
+async def _process_media_group(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    chat_id = job.chat_id
+    group_id = job.data["group_id"]
+
+    album_store = context.chat_data.get("albums", {})
+    group = album_store.pop(group_id, None)
+    if not group:
+        return
+
+    items = group["items"]
+    tg_id = group["user_id"]
+
+    texts = []
+    image_uris = []
+    for it in items:
+        if it.get("text"):
+            texts.append(it["text"])
+        try:
+            uri = await _file_to_data_uri(context, it["file_id"], it["mime"])
+            image_uris.append(uri)
+        except Exception as e:
+            logging.warning("Failed to process media in album: %s", e)
+
+    user_text = "\n".join([t for t in texts if t]).strip()
+
+    processing_msg = await context.bot.send_message(chat_id=chat_id, text="OpenRouter is processing your request…")
+    try:
+        response_text = await openrouter.get_response(user_text if user_text else None, tg_id, image_uris or None)
+        await processing_msg.delete()
+
+        safe = escape_markdown(response_text, version=2)
+        safe = re.sub(r'\\\*\\\*(.+?)\\\*\\\*', r'***\1***', safe, flags=re.S)
+        safe = safe.replace(r'\_', '_').replace(r'\`', '```')
+
+        for i in range(0, len(safe), MAX_MESSAGE_LENGTH):
+            part = safe[i:i + MAX_MESSAGE_LENGTH]
+            await context.bot.send_message(chat_id=chat_id, text=part, parse_mode=ParseMode.MARKDOWN_V2)
+    except TelegramError as e:
+        logging.warning("Error happened while deleting system message: %s", e)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = (update.message.text or update.message.caption or "").strip()
+
+    if update.message.media_group_id:
+        mgid = update.message.media_group_id
+        album_store = context.chat_data.setdefault("albums", {})
+        group = album_store.setdefault(mgid, {"items": [], "job": None, "user_id": update.effective_user.id})
+
+        text = (update.message.caption or update.message.text or "").strip()
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            group["items"].append({"file_id": photo.file_id, "mime": "image/jpeg", "text": text})
+        elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("image/"):
+            mime = update.message.document.mime_type
+            group["items"].append({"file_id": update.message.document.file_id, "mime": mime, "text": text})
+
+        if group["job"]:
+            group["job"].schedule_removal()
+        group["job"] = context.job_queue.run_once(
+            _process_media_group,
+            when=1.0,
+            chat_id=update.effective_chat.id,
+            data={"group_id": mgid},
+        )
+        return
 
     image_uris: List[str] = []
 
