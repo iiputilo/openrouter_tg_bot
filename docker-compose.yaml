@@ -1,0 +1,9 @@
+services:
+  openrouter-bot:
+    build:
+      context: ./
+    container_name: bot
+    env_file:
+      - .env
+    volumes:
+      - ./user_map.json:/app/user_map.json

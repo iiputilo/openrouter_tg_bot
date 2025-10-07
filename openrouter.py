@@ -11,11 +11,25 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 USER_MAP_FILE = Path('user_map.json')
 MAX_HISTORY_MESSAGES = 15
 DEFAULT_MODEL_NAME = "openai/gpt-5"
-AVAILABLE_MODELS = ["openai/gpt-5", "anthropic/claude-sonnet-4.5"]
+AVAILABLE_MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "openai/gpt-5-pro", "openai/gpt-5-codex",
+                    "openai/gpt-4.1-mini", "anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet-4",
+                    "anthropic/claude-opus-4.1", "x-ai/grok-code-fast-1", "deepseek/deepseek-chat-v3.1:free",
+                    "deepseek/deepseek-chat-v3-0324", "google/gemini-2.5-pro", "google/gemma-3-12b-it", ]
 
 MODEL_PRICING = {
     "openai/gpt-5": [1.25, 10],
-    "anthropic/claude-sonnet-4.5": [3, 15]
+    "anthropic/claude-sonnet-4.5": [3, 15],
+    "anthropic/claude-sonnet-4": [3, 15],
+    "x-ai/grok-code-fast-1": [0.2, 1.5],
+    "openai/gpt-4.1-mini": [0.4, 1.6],
+    "deepseek/deepseek-chat-v3.1:free": [0, 0],
+    "deepseek/deepseek-chat-v3-0324": [0.24, 0.84],
+    "google/gemini-2.5-pro": [1.25, 10],
+    "google/gemma-3-12b-it": [0.04, 0.13],
+    "openai/gpt-5-mini": [0.25, 2],
+    "openai/gpt-5-codex": [1.25, 10],
+    "openai/gpt-5-pro": [15, 120],
+    "anthropic/claude-opus-4.1": [15, 75]
 }
 
 def _load_user_map() -> Dict[str, Any]:
