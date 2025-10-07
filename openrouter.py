@@ -1,6 +1,7 @@
 import httpx
 import json
 import uuid
+import os
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -8,7 +9,9 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger(__name__)
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-USER_MAP_FILE = Path('user_map.json')
+DATA_DIR = Path(os.getenv("APP_DATA_DIR", Path(__file__).parent))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+USER_MAP_FILE = DATA_DIR / "user_map.json"
 MAX_HISTORY_MESSAGES = 15
 DEFAULT_MODEL_NAME = "openai/gpt-5"
 AVAILABLE_MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "openai/gpt-5-pro", "openai/gpt-5-codex",

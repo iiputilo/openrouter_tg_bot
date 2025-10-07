@@ -5,5 +5,10 @@ services:
     container_name: bot
     env_file:
       - .env
+    environment:
+      - APP_DATA_DIR=/data
     volumes:
-      - ./user_map.json:/app/user_map.json
+      - openrouter_tg_bot_data:/data
+
+volumes:
+  openrouter_tg_bot_data:
