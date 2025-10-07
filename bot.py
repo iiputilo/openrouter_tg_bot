@@ -1,6 +1,5 @@
 import os
 import logging
-import base64
 import tempfile
 from typing import List
 import re
@@ -30,11 +29,19 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        'This is a bot who can help you with access to OpenRouter API\nDefault model is ***openai\\/gpt\\-5***\n'
-        'To see help use /help command',
-        parse_mode=ParseMode.MARKDOWN_V2
+    base = (
+        'This is a bot who can help you with access to OpenRouter API\n'
+        'Default model is ***openai\\/gpt\\-5***\n'
+        'To see help use /help command'
     )
+    await update.message.reply_text(base, parse_mode=ParseMode.MARKDOWN_V2)
+
+    if not openrouter.has_api_key(update.effective_user.id):
+        await update.message.reply_text(
+            "You haven't set OpenRouter API key\n"
+            'Send `/change\\_api\\_key <your\\_key>` to save your key',
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
@@ -43,6 +50,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /reset \\- reset message history
     /about \\- project information
     /switch\\_model \\- switch to another OpenRouter LLM
+    /change\\_api\\_key <key> \\- set or change your OpenRouter API key
     """
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -54,6 +62,18 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         ''
     )
+
+async def change_api_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    new_key = ' '.join(context.args).strip() if context.args else ''
+    if not new_key:
+        await update.message.reply_text(
+            'Using: `/change\\_api\\_key <your\\_key>`',
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+    openrouter.set_user_api_key(tg_id, new_key)
+    await update.message.reply_text('API key was saved')
 
 async def switch_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
@@ -95,6 +115,7 @@ async def _file_to_data_uri(context: ContextTypes.DEFAULT_TYPE, file_id: str, mi
             os.remove(tmp_path)
         except OSError:
             pass
+    import base64
     b64 = base64.b64encode(data).decode('ascii')
     return f"data:{mime};base64,{b64}"
 
@@ -110,6 +131,15 @@ async def _process_media_group(context: ContextTypes.DEFAULT_TYPE):
 
     items = group["items"]
     tg_id = group["user_id"]
+
+    if not openrouter.has_api_key(tg_id):
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="You haven't set OpenRouter API key\\."
+                 "\nSend `/change\\_api\\_key <your\\_key>` to save your key",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
 
     texts = []
     image_uris = []
@@ -165,6 +195,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if not openrouter.has_api_key(update.effective_user.id):
+        await update.message.reply_text(
+            "You haven't set OpenRouter API key\\."
+            "\nSend `/change\\_api\\_key <your\\_key>` to save your key",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
     image_uris: List[str] = []
 
     if update.message.photo:
@@ -211,6 +249,7 @@ def main():
     app.add_handler(CommandHandler('about', about_command))
     app.add_handler(CommandHandler('switch_model', switch_model_command))
     app.add_handler(CommandHandler('reset', reset_command))
+    app.add_handler(CommandHandler('change_api_key', change_api_key_command))
     app.add_handler(CallbackQueryHandler(set_model_callback, pattern=r"^set_model:"))
     message_filter = (filters.TEXT | filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND
     app.add_handler(MessageHandler(message_filter, handle_message))

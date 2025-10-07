@@ -1,17 +1,13 @@
-import os
 import httpx
 import json
 import uuid
 import logging
 from pathlib import Path
-from dotenv import load_dotenv
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
-load_dotenv()
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 USER_MAP_FILE = Path('user_map.json')
 MAX_HISTORY_MESSAGES = 15
 DEFAULT_MODEL_NAME = "openai/gpt-5"
@@ -31,12 +27,13 @@ def _load_user_map() -> Dict[str, Any]:
         changed = False
         for k, v in list(data.items()):
             if isinstance(v, str):
-                data[k] = {"uid": v, "history": [], "model": DEFAULT_MODEL_NAME}
+                data[k] = {"uid": v, "history": [], "model": DEFAULT_MODEL_NAME, "api_key": None}
                 changed = True
             elif isinstance(v, dict):
                 v.setdefault("uid", str(uuid.uuid4()))
                 v.setdefault("history", [])
                 v.setdefault("model", DEFAULT_MODEL_NAME)
+                v.setdefault("api_key", None)
         if changed:
             _save_user_map(data)
         return data
@@ -53,13 +50,14 @@ def _ensure_user_record(tg_id: int) -> Dict[str, Any]:
     key = str(tg_id)
     rec = user_map.get(key)
     if not rec:
-        rec = {"uid": str(uuid.uuid4()), "history": [], "model": DEFAULT_MODEL_NAME}
+        rec = {"uid": str(uuid.uuid4()), "history": [], "model": DEFAULT_MODEL_NAME, "api_key": None}
         user_map[key] = rec
         _save_user_map(user_map)
     else:
         rec.setdefault("uid", str(uuid.uuid4()))
         rec.setdefault("history", [])
         rec.setdefault("model", DEFAULT_MODEL_NAME)
+        rec.setdefault("api_key", None)
     return rec
 
 def set_user_model(tg_id: int, model_name: str) -> None:
@@ -70,6 +68,19 @@ def set_user_model(tg_id: int, model_name: str) -> None:
 def get_user_model(tg_id: int) -> str:
     rec = _ensure_user_record(tg_id)
     return rec.get("model", DEFAULT_MODEL_NAME)
+
+def set_user_api_key(tg_id: int, api_key: str) -> None:
+    rec = _ensure_user_record(tg_id)
+    rec["api_key"] = (api_key or "").strip()
+    _save_user_map(user_map)
+
+def get_user_api_key(tg_id: int) -> Optional[str]:
+    rec = _ensure_user_record(tg_id)
+    key = (rec.get("api_key") or "").strip()
+    return key if key else None
+
+def has_api_key(tg_id: int) -> bool:
+    return bool(get_user_api_key(tg_id))
 
 def get_user_id(tg_id: int) -> str:
     return _ensure_user_record(tg_id)["uid"]
@@ -83,11 +94,11 @@ def _trim_history(history: List[Dict[str, Any]], max_messages: int) -> List[Dict
     return history[-max_messages:] if len(history) > max_messages else history
 
 async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Optional[List[str]] = None) -> str:
-    if not OPENROUTER_API_KEY:
-        return "Configuration error: cannot find `OPENROUTER_API_KEY`"
-
     rec = _ensure_user_record(tg_id)
     model = rec["model"]
+    api_key = get_user_api_key(tg_id)
+    if not api_key:
+        return "Configuration error: OpenRouter API key wasn't set\\. Use the command `/change\\_api\\_key <key>`"
 
     if image_data_uris:
         parts: List[Dict[str, Any]] = []
@@ -104,7 +115,7 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
     _save_user_map(user_map)
 
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/iiputilo/openrouter_tg_bot",
         "X-Title": "openrouter_tg_bot"
@@ -117,7 +128,6 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
     async with httpx.AsyncClient() as client:
         response = await client.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=520.0)
 
-    # Показываем понятную ошибку вместо исключения
     if response.status_code >= 400:
         try:
             err_json = response.json()
@@ -133,7 +143,6 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
 
     data = response.json()
 
-    # Ответ может быть строкой либо массивом частей
     raw_content = data["choices"][0]["message"]["content"]
     if isinstance(raw_content, list):
         content = "\n".join(
