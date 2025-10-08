@@ -114,41 +114,63 @@ async def _file_to_data_uri(context: ContextTypes.DEFAULT_TYPE, file_id: str, mi
     return f"data:{mime};base64,{b64}"
 
 def format_markdown_v2_safe(text: str) -> str:
-    """
-    Сохраняет безопасные конструкции MarkdownV2:
-    - тройные кодовые блоки ```...```
-    - инлайн‑код `...`
-    - жирный **...**
-    Остальной текст экранируется, чтобы не было 400 parse errors.
-    """
     placeholders = {}
-    counter = 0
+    order = []
 
-    def put(match, kind):
-        nonlocal counter
-        key = f"PLACEHOLDER_{kind}_{counter}"
-        placeholders[key] = match.group(0)
-        counter += 1
+    def put(key: str, value: str):
+        placeholders[key] = value
+        order.append(key)
         return key
 
-    # 1) Защитим кодовые блоки (с возможным указанием языка)
-    text = re.sub(r"```[a-zA-Z0-9_+\-]*\n[\s\S]*?```", lambda m: put(m, "CB"), text)
+    def _cb(m):
+        idx = len(placeholders)
+        key = f"§CB{idx}§"
+        return put(key, m.group(0))
 
-    # 2) Защитим инлайн‑код
-    text = re.sub(r"`[^`\n]+`", lambda m: put(m, "IC"), text)
+    text = re.sub(r"```[\w+\-]*\n[\s\S]*?```", _cb, text)
 
-    # 3) Защитим жирный
-    text = re.sub(r"\*\*[^\n][\s\S]*?\*\*", lambda m: put(m, "B"), text)
+    def _ic(m):
+        idx = len(placeholders)
+        key = f"§IC{idx}§"
+        return put(key, m.group(0))
 
-    # 4) Экранируем всё остальное под MarkdownV2
+    text = re.sub(r"`[^`\n]+`", _ic, text)
+
+    bold_spans = []
+
+    def _bold(m):
+        idx = len(placeholders)
+        key = f"§B{idx}§"
+        inner = m.group(1)
+        bold_spans.append((key, inner))
+        return put(key, key)
+
+    text = re.sub(r"(?<!\\)\*\*(.+?)(?<!\\)\*\*", _bold, text, flags=re.S)
+
     escaped = escape_markdown(text, version=2)
 
-    # 5) Вернём сохранённые конструкции обратно
-    for key, original in placeholders.items():
+    for key, inner in bold_spans:
         escaped_key = escape_markdown(key, version=2)
-        escaped = escaped.replace(escaped_key, original)
+        inner_escaped = escape_markdown(inner, version=2)
+        escaped = escaped.replace(escaped_key, f"*{inner_escaped}*")
+
+    for key in order:
+        if key.startswith("§CB") or key.startswith("§IC"):
+            escaped_key = escape_markdown(key, version=2)
+            escaped = escaped.replace(escaped_key, placeholders[key])
 
     return escaped
+
+def chunk_markdown_v2(text: str, limit: int = 4096):
+    i, n = 0, len(text)
+    while i < n:
+        j = min(n, i + limit)
+        if j < n:
+            k = text.rfind("\n", i, j)
+            if k != -1 and k >= i + limit - 512:
+                j = k
+        yield text[i:j]
+        i = j
 
 async def _process_media_group(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -191,10 +213,9 @@ async def _process_media_group(context: ContextTypes.DEFAULT_TYPE):
         await processing_msg.delete()
 
         safe = format_markdown_v2_safe(response_text)
+        for part in chunk_markdown_v2(safe, MAX_MESSAGE_LENGTH):
+            await context.bot.send_message(part, parse_mode=ParseMode.MARKDOWN_V2)
 
-        for i in range(0, len(safe), MAX_MESSAGE_LENGTH):
-            part = safe[i:i + MAX_MESSAGE_LENGTH]
-            await context.bot.send_message(chat_id=chat_id, text=part, parse_mode=ParseMode.MARKDOWN_V2)
     except TelegramError as e:
         logging.warning("Error happened while deleting system message: %s", e)
 
@@ -260,9 +281,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await processing_msg.delete()
 
         safe = format_markdown_v2_safe(response_text)
-
-        for i in range(0, len(safe), MAX_MESSAGE_LENGTH):
-            part = safe[i:i + MAX_MESSAGE_LENGTH]
+        for part in chunk_markdown_v2(safe, MAX_MESSAGE_LENGTH):
             await update.message.reply_text(part, parse_mode=ParseMode.MARKDOWN_V2)
 
     except TelegramError as e:
