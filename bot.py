@@ -48,20 +48,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     📖 ***Command help:***
     /start \\- start a bot
     /reset \\- reset message history
-    /about \\- project information
     /switch\\_model \\- switch to another OpenRouter LLM
-    /change\\_api\\_key <key> \\- set or change your OpenRouter API key
+    /change\\_api\\_key \\<key\\> \\- set or change your OpenRouter API key
     """
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     openrouter.reset_history(update.effective_user.id)
     await update.message.reply_text("Message history cleared")
-
-async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        ''
-    )
 
 async def change_api_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
@@ -246,7 +240,6 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_KEY).build()
     app.add_handler(CommandHandler('start', start_command))
     app.add_handler(CommandHandler('help', help_command))
-    app.add_handler(CommandHandler('about', about_command))
     app.add_handler(CommandHandler('switch_model', switch_model_command))
     app.add_handler(CommandHandler('reset', reset_command))
     app.add_handler(CommandHandler('change_api_key', change_api_key_command))
