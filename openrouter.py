@@ -163,7 +163,6 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
         logger.error("OpenRouter API error %s: %s", response.status_code, err_msg)
         return f"OpenRouter error {response.status_code}: {err_msg}"
 
-    # Безопасный разбор JSON при 2xx
     data: Dict[str, Any]
     try:
         data = response.json()
@@ -203,13 +202,6 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
     rec["history"].append({"role": "assistant", "content": content})
     rec["history"] = _trim_history(rec["history"], MAX_HISTORY_MESSAGES)
     _save_user_map(user_map)
-
-    return (
-        f"{content}\n\n---\n"
-        f"Input cost: ${cost_input:.6f}\n"
-        f"Output cost: ${cost_output:.6f}\n"
-        f"**Total cost: ${total_cost:.6f}**"
-    )
 
     return (
         f"{content}\n\n---\n"
