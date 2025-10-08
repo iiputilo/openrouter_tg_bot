@@ -231,6 +231,13 @@ async def _process_media_group(context: ContextTypes.DEFAULT_TYPE):
 
     except TelegramError as e:
         logging.warning("Error happened while deleting system message: %s", e)
+    except Exception as e:
+        logging.error("Failed to process media group: %s", e, exc_info=True)
+        try:
+            await processing_msg.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(chat_id=chat_id, text="OpenRouter error. Try again later.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = (update.message.text or update.message.caption or "").strip()

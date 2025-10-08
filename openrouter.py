@@ -134,6 +134,7 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "Accept": "application/json",
         "HTTP-Referer": "https://github.com/iiputilo/openrouter_tg_bot",
         "X-Title": "openrouter_tg_bot"
     }
@@ -142,8 +143,12 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
         "messages": rec["history"]
     }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=520.0)
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=520.0)
+    except httpx.HTTPError as e:
+        logger.error("OpenRouter network error: %s", e)
+        return "OpenRouter network error. Try again later."
 
     if response.status_code >= 400:
         try:
@@ -154,13 +159,29 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
                 or json.dumps(err_json, ensure_ascii=False)
             )
         except Exception:
-            err_msg = response.text
+            err_msg = (response.text or "").strip()
         logger.error("OpenRouter API error %s: %s", response.status_code, err_msg)
         return f"OpenRouter error {response.status_code}: {err_msg}"
 
-    data = response.json()
+    # Безопасный разбор JSON при 2xx
+    data: Dict[str, Any]
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        snippet = (response.text or "")[:500]
+        ctype = response.headers.get("content-type", "")
+        logger.error(
+            "Invalid JSON from OpenRouter (%s, %s). First 500 chars: %r",
+            response.status_code, ctype, snippet
+        )
+        return "OpenRouter returned an unexpected response. Please try again."
 
-    raw_content = data["choices"][0]["message"]["content"]
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        logger.error("OpenRouter response has no choices: %s", json.dumps(data)[:800])
+        return "OpenRouter returned empty response. Please try again."
+
+    raw_content = choices[0].get("message", {}).get("content", "")
     if isinstance(raw_content, list):
         content = "\n".join(
             part.get("text", "")
@@ -168,11 +189,11 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
             if isinstance(part, dict)
         ).strip()
     else:
-        content = str(raw_content)
+        content = str(raw_content or "")
 
-    usage = data.get("usage", {})
-    prompt_tokens = usage.get("prompt_tokens", 0)
-    completion_tokens = usage.get("completion_tokens", 0)
+    usage = data.get("usage", {}) or {}
+    prompt_tokens = usage.get("prompt_tokens", 0) or 0
+    completion_tokens = usage.get("completion_tokens", 0) or 0
     price_per_1m_input, price_per_1m_output = MODEL_PRICING.get(model, [0, 0])
 
     cost_input = prompt_tokens / 10**6 * price_per_1m_input
@@ -182,6 +203,13 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
     rec["history"].append({"role": "assistant", "content": content})
     rec["history"] = _trim_history(rec["history"], MAX_HISTORY_MESSAGES)
     _save_user_map(user_map)
+
+    return (
+        f"{content}\n\n---\n"
+        f"Input cost: ${cost_input:.6f}\n"
+        f"Output cost: ${cost_output:.6f}\n"
+        f"**Total cost: ${total_cost:.6f}**"
+    )
 
     return (
         f"{content}\n\n---\n"
