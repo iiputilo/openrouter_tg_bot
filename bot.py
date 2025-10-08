@@ -113,6 +113,43 @@ async def _file_to_data_uri(context: ContextTypes.DEFAULT_TYPE, file_id: str, mi
     b64 = base64.b64encode(data).decode('ascii')
     return f"data:{mime};base64,{b64}"
 
+def format_markdown_v2_safe(text: str) -> str:
+    """
+    Сохраняет безопасные конструкции MarkdownV2:
+    - тройные кодовые блоки ```...```
+    - инлайн‑код `...`
+    - жирный **...**
+    Остальной текст экранируется, чтобы не было 400 parse errors.
+    """
+    placeholders = {}
+    counter = 0
+
+    def put(match, kind):
+        nonlocal counter
+        key = f"PLACEHOLDER_{kind}_{counter}"
+        placeholders[key] = match.group(0)
+        counter += 1
+        return key
+
+    # 1) Защитим кодовые блоки (с возможным указанием языка)
+    text = re.sub(r"```[a-zA-Z0-9_+\-]*\n[\s\S]*?```", lambda m: put(m, "CB"), text)
+
+    # 2) Защитим инлайн‑код
+    text = re.sub(r"`[^`\n]+`", lambda m: put(m, "IC"), text)
+
+    # 3) Защитим жирный
+    text = re.sub(r"\*\*[^\n][\s\S]*?\*\*", lambda m: put(m, "B"), text)
+
+    # 4) Экранируем всё остальное под MarkdownV2
+    escaped = escape_markdown(text, version=2)
+
+    # 5) Вернём сохранённые конструкции обратно
+    for key, original in placeholders.items():
+        escaped_key = escape_markdown(key, version=2)
+        escaped = escaped.replace(escaped_key, original)
+
+    return escaped
+
 async def _process_media_group(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     chat_id = job.chat_id
@@ -153,9 +190,7 @@ async def _process_media_group(context: ContextTypes.DEFAULT_TYPE):
         response_text = await openrouter.get_response(user_text if user_text else None, tg_id, image_uris or None)
         await processing_msg.delete()
 
-        safe = escape_markdown(response_text, version=2)
-        safe = re.sub(r'\\\*\\\*(.+?)\\\*\\\*', r'***\1***', safe, flags=re.S)
-        safe = safe.replace(r'\_', '_').replace(r'\`', '```')
+        safe = format_markdown_v2_safe(response_text)
 
         for i in range(0, len(safe), MAX_MESSAGE_LENGTH):
             part = safe[i:i + MAX_MESSAGE_LENGTH]
@@ -224,9 +259,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response_text = await openrouter.get_response(user_text if user_text else None, update.effective_user.id, image_uris or None)
         await processing_msg.delete()
 
-        safe = escape_markdown(response_text, version=2)
-        safe = re.sub(r'\\\*\\\*(.+?)\\\*\\\*', r'***\1***', safe, flags=re.S)
-        safe = safe.replace(r'\_', '_').replace(r'\`', '```')
+        safe = format_markdown_v2_safe(response_text)
 
         for i in range(0, len(safe), MAX_MESSAGE_LENGTH):
             part = safe[i:i + MAX_MESSAGE_LENGTH]
