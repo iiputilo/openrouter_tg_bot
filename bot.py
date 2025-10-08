@@ -26,7 +26,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     err = getattr(context, "error", None)
 
     if err is not None:
-        # Логируем реальную трассировку исключения
         tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
         logging.error("Unhandled exception while processing update:\n%s", tb)
     else:
@@ -228,7 +227,7 @@ async def _process_media_group(context: ContextTypes.DEFAULT_TYPE):
 
         safe = format_markdown_v2_safe(response_text)
         for part in chunk_markdown_v2(safe, MAX_MESSAGE_LENGTH):
-            await context.bot.send_message(part, parse_mode=ParseMode.MARKDOWN_V2)
+            await context.bot.send_message(chat_id, part, parse_mode=ParseMode.MARKDOWN_V2)
 
     except TelegramError as e:
         logging.warning("Error happened while deleting system message: %s", e)
