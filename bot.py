@@ -1,6 +1,7 @@
 import os
 import logging
 import tempfile
+import traceback
 from typing import List
 import re
 import openrouter
@@ -20,13 +21,26 @@ load_dotenv()
 TELEGRAM_BOT_KEY = os.getenv("TELEGRAM_BOT_TOKEN")
 MAX_MESSAGE_LENGTH = 4096
 
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logging.exception("Error while processing exception")
-    if update and getattr(update, "effective_chat", None):
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Internal error occurred. Try again later"
-        )
+    err = getattr(context, "error", None)
+
+    if err is not None:
+        # Логируем реальную трассировку исключения
+        tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+        logging.error("Unhandled exception while processing update:\n%s", tb)
+    else:
+        logging.error("Unhandled exception while processing update (no context.error)")
+
+    chat = getattr(update, "effective_chat", None)
+    if chat and getattr(chat, "id", None):
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="Internal error occurred. Try again later"
+            )
+        except Exception:
+            logging.warning("Failed to notify user about the error", exc_info=True)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     base = (
