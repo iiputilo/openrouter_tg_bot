@@ -9,6 +9,7 @@ services:
       - APP_DATA_DIR=/data
     volumes:
       - openrouter_tg_bot_data:/data
+      - ./model_pricing.json:/data/model_pricing.json:ro
 
 volumes:
   openrouter_tg_bot_data:
