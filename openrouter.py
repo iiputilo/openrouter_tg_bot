@@ -49,6 +49,7 @@ def _load_model_pricing() -> Dict[str, List[float]]:
 
 
 model_pricing: Dict[str, List[float]] = _load_model_pricing()
+available_models: List[str] = list(model_pricing.keys())
 
 def _load_user_map() -> Dict[str, Any]:
     if not USER_MAP_FILE.exists():

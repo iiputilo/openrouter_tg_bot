@@ -88,7 +88,7 @@ async def switch_model_command(update: Update, context: ContextTypes.DEFAULT_TYP
     safe_model = escape_markdown(current, version=2)
     buttons = [
         [InlineKeyboardButton(m, callback_data=f"set_model:{m}")]
-        for m in openrouter.AVAILABLE_MODELS
+        for m in openrouter.available_models
     ]
     markup = InlineKeyboardMarkup(buttons)
     text = f"Your current model is ***{safe_model}***\nSelect another model:"
