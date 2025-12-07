@@ -12,28 +12,43 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DATA_DIR = Path(os.getenv("APP_DATA_DIR", Path(__file__).parent))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 USER_MAP_FILE = DATA_DIR / "user_map.json"
-MAX_HISTORY_MESSAGES = 15
+MAX_HISTORY_MESSAGES = os.getenv("MAX_HISTORY_MESSAGES", 30)
+MODEL_PRICING_FILE = DATA_DIR / "model_pricing.json"
 DEFAULT_MODEL_NAME = "openai/gpt-5"
-AVAILABLE_MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "openai/gpt-5-pro", "openai/gpt-5-codex",
-                    "openai/gpt-4.1-mini", "anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet-4",
-                    "anthropic/claude-opus-4.1", "x-ai/grok-code-fast-1", "deepseek/deepseek-chat-v3.1:free",
-                    "deepseek/deepseek-chat-v3-0324", "google/gemini-2.5-pro", "google/gemma-3-12b-it", ]
 
-MODEL_PRICING = {
-    "openai/gpt-5": [1.25, 10],
-    "anthropic/claude-sonnet-4.5": [3, 15],
-    "anthropic/claude-sonnet-4": [3, 15],
-    "x-ai/grok-code-fast-1": [0.2, 1.5],
-    "openai/gpt-4.1-mini": [0.4, 1.6],
-    "deepseek/deepseek-chat-v3.1:free": [0, 0],
-    "deepseek/deepseek-chat-v3-0324": [0.24, 0.84],
-    "google/gemini-2.5-pro": [1.25, 10],
-    "google/gemma-3-12b-it": [0.04, 0.13],
-    "openai/gpt-5-mini": [0.25, 2],
-    "openai/gpt-5-codex": [1.25, 10],
-    "openai/gpt-5-pro": [15, 120],
-    "anthropic/claude-opus-4.1": [15, 75]
+DEFAULT_MODEL_PRICING = {
+    "openai/gpt-5": [1.25, 10]
 }
+
+def _load_model_pricing() -> Dict[str, List[float]]:
+    if not MODEL_PRICING_FILE.exists():
+        MODEL_PRICING_FILE.write_text(
+            json.dumps(DEFAULT_MODEL_PRICING, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return DEFAULT_MODEL_PRICING.copy()
+    try:
+        content = MODEL_PRICING_FILE.read_text(encoding="utf-8")
+        data = json.loads(content) if content.strip() else {}
+        if not isinstance(data, dict):
+            raise ValueError("model_pricing must be an object")
+        result: Dict[str, List[float]] = {}
+        for key, value in data.items():
+            if isinstance(value, list) and len(value) == 2:
+                result[str(key)] = [float(value[0]), float(value[1])]
+        if not result:
+            raise ValueError("model_pricing is empty")
+        return result
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning("Incorrect pricing file %s: %s", MODEL_PRICING_FILE, exc)
+        MODEL_PRICING_FILE.write_text(
+            json.dumps(DEFAULT_MODEL_PRICING, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return DEFAULT_MODEL_PRICING.copy()
+
+
+model_pricing: Dict[str, List[float]] = _load_model_pricing()
 
 def _load_user_map() -> Dict[str, Any]:
     if not USER_MAP_FILE.exists():
@@ -128,7 +143,7 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
         user_message = {"role": "user", "content": [{"type": "text", "text": user_text or ""}]}
 
     rec["history"].append(user_message)
-    rec["history"] = _trim_history(rec["history"], MAX_HISTORY_MESSAGES)
+    rec["history"] = _trim_history(rec["history"], int(MAX_HISTORY_MESSAGES))
     _save_user_map(user_map)
 
     headers = {
@@ -193,14 +208,14 @@ async def get_response(user_text: Optional[str], tg_id: int, image_data_uris: Op
     usage = data.get("usage", {}) or {}
     prompt_tokens = usage.get("prompt_tokens", 0) or 0
     completion_tokens = usage.get("completion_tokens", 0) or 0
-    price_per_1m_input, price_per_1m_output = MODEL_PRICING.get(model, [0, 0])
+    price_per_1m_input, price_per_1m_output = model_pricing.get(model, [0, 0])
 
     cost_input = prompt_tokens / 10**6 * price_per_1m_input
     cost_output = completion_tokens / 10**6 * price_per_1m_output
     total_cost = cost_input + cost_output
 
     rec["history"].append({"role": "assistant", "content": content})
-    rec["history"] = _trim_history(rec["history"], MAX_HISTORY_MESSAGES)
+    rec["history"] = _trim_history(rec["history"], int(MAX_HISTORY_MESSAGES))
     _save_user_map(user_map)
 
     return (
