@@ -213,24 +213,44 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+def _web_search_markup(enabled: bool) -> InlineKeyboardMarkup:
+    next_value = "off" if enabled else "on"
+    label = f"{'Off' if enabled else 'On'}"
+    btn = InlineKeyboardButton(label, callback_data=f"web_search:{next_value}")
+    return InlineKeyboardMarkup([[btn]])
+
+
 async def web_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_id = update.effective_user.id
-    arg = (context.args[0] if context.args else "").strip().lower()
+    enabled = openrouter.get_user_web_search(tg_id)
+    state = "on" if enabled else "off"
 
-    if arg not in {"on", "off"}:
-        enabled = openrouter.get_user_web_search(tg_id)
-        state = "on" if enabled else "off"
-        await update.message.reply_text(
-            f"Web search is ***{state}***\nUsing: `/web\\_search <on|off>`",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+    text = f"Web search is ***{state}***"
+    await update.message.reply_text(
+        text,
+        reply_markup=_web_search_markup(enabled),
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+async def web_search_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        _, value = query.data.split(":", 1)
+    except Exception:
         return
 
-    enabled = arg == "on"
+    tg_id = query.from_user.id
+    enabled = value == "on"
     openrouter.set_user_web_search(tg_id, enabled)
+
     state = "on" if enabled else "off"
-    await update.message.reply_text(
-        f"Web search switched to ***{state}***",
+    text = f"Web search is ***{state}***"
+    await query.edit_message_text(
+        text,
+        reply_markup=_web_search_markup(enabled),
         parse_mode=ParseMode.MARKDOWN_V2,
     )
 
@@ -471,6 +491,7 @@ def main() -> None:
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("web_search", web_search_command))
     app.add_handler(CallbackQueryHandler(set_model_callback, pattern=r"^set_model:"))
+    app.add_handler(CallbackQueryHandler(web_search_callback, pattern=r"^web_search:"))
 
     message_filter = (filters.TEXT | filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF) & ~filters.COMMAND
     app.add_handler(MessageHandler(message_filter, handle_message))
