@@ -1,4 +1,12 @@
 {
+  "openai/gpt-5.2" : [
+    1.75,
+    14
+  ],
+  "openai/gpt-5.2-pro" : [
+    21,
+    168
+  ],
   "openai/gpt-5.1" : [
     1.25,
     10
@@ -50,6 +58,10 @@
   "deepseek/deepseek-chat-v3.1:free": [
     0,
     0
+  ],
+  "deepseek/deepseek-v3.2": [
+    0.26,
+    0.38
   ],
   "deepseek/deepseek-chat-v3-0324": [
     0.24,

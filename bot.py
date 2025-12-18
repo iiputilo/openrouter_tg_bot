@@ -153,6 +153,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/set\\_history \\<n\\> \\- set history size \\(messages\\)\n"
         "/history \\- show current history size\n"
         "/switch\\_model \\- switch to the another OpenRouter LLM\n"
+        "/web\\_search \\<on\\|off\\> \\- toggle web search\n"
         "/change\\_api\\_key \\<key\\> \\- set or change your OpenRouter API key\n"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
@@ -208,6 +209,28 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     n = openrouter.get_user_max_history(tg_id)
     await update.message.reply_text(
         f"Current history size: {n} messages",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+async def web_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_id = update.effective_user.id
+    arg = (context.args[0] if context.args else "").strip().lower()
+
+    if arg not in {"on", "off"}:
+        enabled = openrouter.get_user_web_search(tg_id)
+        state = "on" if enabled else "off"
+        await update.message.reply_text(
+            f"Web search is ***{state}***\nUsing: `/web\\_search <on|off>`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    enabled = arg == "on"
+    openrouter.set_user_web_search(tg_id, enabled)
+    state = "on" if enabled else "off"
+    await update.message.reply_text(
+        f"Web search switched to ***{state}***",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
 
@@ -446,6 +469,7 @@ def main() -> None:
     app.add_handler(CommandHandler("change_api_key", change_api_key_command))
     app.add_handler(CommandHandler("set_history", set_history_command))
     app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("web_search", web_search_command))
     app.add_handler(CallbackQueryHandler(set_model_callback, pattern=r"^set_model:"))
 
     message_filter = (filters.TEXT | filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF) & ~filters.COMMAND
