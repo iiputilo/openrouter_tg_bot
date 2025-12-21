@@ -1,13 +1,15 @@
 import os
 import io
+import re
 import base64
 import asyncio
 import logging
 import tempfile
 import traceback
-from typing import List
+from typing import List, Tuple
 
 import openrouter
+import openpyxl
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -33,7 +35,10 @@ TELEGRAM_BOT_KEY = os.getenv("TELEGRAM_BOT_TOKEN")
 
 MAX_MESSAGE_LENGTH = 4096
 MAX_PDF_CHARS = int(os.getenv("MAX_PDF_CHARS", "20000000"))
+MAX_XLSX_CHARS = int(os.getenv("MAX_XLSX_CHARS", "200000"))  # лимит текста из xlsx
 BOT_REQUEST_TIMEOUT = float(os.getenv("BOT_REQUEST_TIMEOUT", "3600"))
+
+_DATA_IMAGE_RE = re.compile(r"(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+)")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -84,6 +89,81 @@ async def send_plain_text(bot, chat_id: int, text: str) -> None:
     await bot.send_message(chat_id=chat_id, text=text or "")
 
 
+def _extract_data_image_urls(text: str) -> List[str]:
+    if not text:
+        return []
+    matches = _DATA_IMAGE_RE.findall(text)
+    out: List[str] = []
+    for m in matches:
+        u = (m or "").strip()
+        if u:
+            out.append(u)
+    return out
+
+
+def _strip_data_image_urls(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = _DATA_IMAGE_RE.sub("[image]", text)
+    lines = [ln.rstrip() for ln in cleaned.splitlines()]
+    return "\n".join(lines).strip()
+
+
+def _data_url_to_bytes(data_url: str) -> Tuple[bytes, str]:
+    if "," not in data_url:
+        raise ValueError("Invalid data url")
+    meta, b64 = data_url.split(",", 1)
+    meta_l = meta.lower()
+
+    if not meta_l.startswith("data:image/"):
+        raise ValueError("Not an image data url")
+    if ";base64" not in meta_l:
+        raise ValueError("Only base64 data urls are supported")
+
+    mime = meta.split(":", 1)[1].split(";", 1)[0].strip() if ":" in meta else "image/png"
+    payload = re.sub(r"\s+", "", b64)
+    return base64.b64decode(payload), (mime or "image/png")
+
+
+def _mime_to_ext(mime: str) -> str:
+    m = (mime or "").lower().strip()
+    if m in ("image/jpeg", "image/jpg"):
+        return "jpg"
+    if m == "image/webp":
+        return "webp"
+    if m == "image/gif":
+        return "gif"
+    return "png"
+
+
+async def send_openrouter_result(bot, chat_id: int, result_text: str) -> None:
+    data_urls = _extract_data_image_urls(result_text)
+
+    for u in data_urls:
+        try:
+            img_bytes, mime = _data_url_to_bytes(u)
+            ext = _mime_to_ext(mime)
+            bio = io.BytesIO(img_bytes)
+            bio.name = f"image.{ext}"
+            await bot.send_photo(chat_id=chat_id, photo=bio)
+        except Exception:
+            try:
+                img_bytes, mime = _data_url_to_bytes(u)
+                ext = _mime_to_ext(mime)
+                bio = io.BytesIO(img_bytes)
+                bio.name = f"image.{ext}"
+                await bot.send_document(chat_id=chat_id, document=bio)
+            except Exception:
+                pass
+
+    cleaned = _strip_data_image_urls(result_text)
+    if not cleaned:
+        return
+
+    for part in chunk_plain(cleaned, MAX_MESSAGE_LENGTH):
+        await send_plain_text(bot, chat_id, part)
+
+
 async def _download_to_bytes(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> bytes:
     tg_file = await context.bot.get_file(file_id)
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -129,6 +209,52 @@ def _extract_pdf_text(pdf_bytes: bytes, limit_chars: int = 20000) -> str:
     return text
 
 
+def _extract_xlsx_text(xlsx_bytes: bytes, limit_chars: int = 200000) -> str:
+    wb = openpyxl.load_workbook(filename=io.BytesIO(xlsx_bytes), data_only=True, read_only=True)
+    out_parts: List[str] = []
+    total = 0
+
+    for ws in wb.worksheets:
+        header = f"[XLSX:{ws.title}]"
+        out_parts.append(header)
+        total += len(header) + 1
+        if total >= limit_chars:
+            break
+
+        for row in ws.iter_rows(values_only=True):
+            if total >= limit_chars:
+                break
+
+            vals: List[str] = []
+            for v in row:
+                if v is None:
+                    vals.append("")
+                else:
+                    s = str(v)
+                    s = re.sub(r"\s+", " ", s).strip()
+                    vals.append(s)
+
+            line = "\t".join(vals).rstrip()
+            if not line.strip():
+                continue
+
+            out_parts.append(line)
+            total += len(line) + 1
+
+            if total >= limit_chars:
+                break
+
+        out_parts.append("")
+        total += 1
+        if total >= limit_chars:
+            break
+
+    text = "\n".join(out_parts).strip()
+    if len(text) > limit_chars:
+        text = text[:limit_chars]
+    return text
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     base = (
         "This is a bot who can help you with access to the OpenRouter API\n"
@@ -155,6 +281,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/switch\\_model \\- switch to the another OpenRouter LLM\n"
         "/web\\_search \\<on\\|off\\> \\- toggle web search\n"
         "/change\\_api\\_key \\<key\\> \\- set or change your OpenRouter API key\n"
+        "\n"
+        "🖼️ ***Image generation:***\n"
+        "If selected model supports image generation, the bot will send generated images as photos\\.\n"
+        "\n"
+        "📄 ***Files:***\n"
+        "PDF and XLSX are supported\\; text will be extracted and sent to the model\\."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -334,6 +466,18 @@ async def _process_media_group(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logging.warning("Failed to process pdf in album: %s", exc)
                 texts.append("[PDF] (failed to extract text)")
 
+        if it.get("kind") == "xlsx":
+            try:
+                xlsx_bytes = await _download_to_bytes(context, it["file_id"])
+                xlsx_text = _extract_xlsx_text(xlsx_bytes, limit_chars=MAX_XLSX_CHARS)
+                if xlsx_text:
+                    texts.append(f"[XLSX]\n{xlsx_text}")
+                else:
+                    texts.append("[XLSX] (no extractable text)")
+            except Exception as exc:
+                logging.warning("Failed to process xlsx in album: %s", exc)
+                texts.append("[XLSX] (failed to extract text)")
+
     user_text = "\n".join([t for t in texts if t]).strip()
 
     processing_msg = await context.bot.send_message(
@@ -348,8 +492,7 @@ async def _process_media_group(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await _safe_delete(processing_msg)
 
-        for part in chunk_plain(response_text, MAX_MESSAGE_LENGTH):
-            await send_plain_text(context.bot, chat_id, part)
+        await send_openrouter_result(context.bot, chat_id, response_text)
 
     except asyncio.TimeoutError:
         await _safe_delete(processing_msg)
@@ -390,6 +533,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 group["items"].append(
                     {"kind": "pdf", "file_id": update.message.document.file_id, "mime": mt, "text": text}
                 )
+            elif mt in ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",):
+                group["items"].append(
+                    {"kind": "xlsx", "file_id": update.message.document.file_id, "mime": mt, "text": text}
+                )
 
         if group["job"]:
             group["job"].schedule_removal()
@@ -413,6 +560,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     image_uris: List[str] = []
     pdf_text_block: str = ""
+    xlsx_text_block: str = ""
 
     if update.message.photo:
         photo = update.message.photo[-1]
@@ -440,15 +588,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception as exc:
                 logging.warning("Failed to process pdf document: %s", exc)
                 pdf_text_block = "[PDF] (failed to extract text)"
+        elif mt in ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",):
+            try:
+                xlsx_bytes = await _download_to_bytes(context, update.message.document.file_id)
+                xlsx_text = _extract_xlsx_text(xlsx_bytes, limit_chars=MAX_XLSX_CHARS)
+                if xlsx_text:
+                    xlsx_text_block = f"[XLSX]\n{xlsx_text}"
+                else:
+                    xlsx_text_block = "[XLSX] (no extractable text)"
+            except Exception as exc:
+                logging.warning("Failed to process xlsx document: %s", exc)
+                xlsx_text_block = "[XLSX] (failed to extract text)"
 
     processing_msg = await update.message.reply_text("OpenRouter is processing your request…")
 
     try:
-        combined_text = "\n\n".join([t for t in [user_text, pdf_text_block] if t]).strip()
+        combined_text = "\n\n".join([t for t in [user_text, pdf_text_block, xlsx_text_block] if t]).strip()
 
         if not combined_text and not image_uris:
             await _safe_delete(processing_msg)
-            await update.message.reply_text("Attach an image, PDF, or send a message")
+            await update.message.reply_text("Attach an image, PDF, XLSX, or send a message")
             return
 
         response_text = await _run_with_timeout(
@@ -461,8 +620,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         await _safe_delete(processing_msg)
 
-        for part in chunk_plain(response_text, MAX_MESSAGE_LENGTH):
-            await send_plain_text(context.bot, update.effective_chat.id, part)
+        await send_openrouter_result(context.bot, update.effective_chat.id, response_text)
 
     except asyncio.TimeoutError:
         await _safe_delete(processing_msg)
@@ -493,7 +651,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(set_model_callback, pattern=r"^set_model:"))
     app.add_handler(CallbackQueryHandler(web_search_callback, pattern=r"^web_search:"))
 
-    message_filter = (filters.TEXT | filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF) & ~filters.COMMAND
+    message_filter = (
+        filters.TEXT
+        | filters.PHOTO
+        | filters.Document.IMAGE
+        | filters.Document.PDF
+        | filters.Document.MimeType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    ) & ~filters.COMMAND
     app.add_handler(MessageHandler(message_filter, handle_message))
 
     app.add_error_handler(error_handler)

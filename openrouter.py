@@ -4,7 +4,7 @@ import os
 import uuid
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +19,11 @@ MODEL_PRICING_FILE = DATA_DIR / "model_pricing.json"
 
 DEFAULT_MODEL_NAME = "openai/gpt-5"
 
-DEFAULT_MODEL_PRICING: Dict[str, List[float]] = {
-    "openai/gpt-5": [1.25, 10.0],
+ModelKind = Literal["t", "i"]
+ModelPricingEntry = Tuple[float, float, ModelKind]
+
+DEFAULT_MODEL_PRICING: Dict[str, List[Any]] = {
+    "openai/gpt-5": [1.25, 10.0, "t"],
 }
 
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "30"))
@@ -44,13 +47,34 @@ WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
 WEB_SEARCH_MAX_OUTPUT_TOKENS = int(os.getenv("WEB_SEARCH_MAX_OUTPUT_TOKENS", "9000"))
 
 
-def _load_model_pricing() -> Dict[str, List[float]]:
+def _normalize_pricing_entry(value: Any) -> Optional[ModelPricingEntry]:
+    if not isinstance(value, list):
+        return None
+    if len(value) == 2:
+        try:
+            return float(value[0]), float(value[1]), "t"
+        except Exception:
+            return None
+    if len(value) >= 3:
+        try:
+            inp = float(value[0])
+            out = float(value[1])
+            kind = str(value[2]).strip().lower()
+            if kind not in ("t", "i"):
+                kind = "t"
+            return inp, out, kind  # type: ignore[return-value]
+        except Exception:
+            return None
+    return None
+
+
+def _load_model_pricing() -> Dict[str, ModelPricingEntry]:
     if not MODEL_PRICING_FILE.exists():
         MODEL_PRICING_FILE.write_text(
             json.dumps(DEFAULT_MODEL_PRICING, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return DEFAULT_MODEL_PRICING.copy()
+        return {k: _normalize_pricing_entry(v) for k, v in DEFAULT_MODEL_PRICING.items() if _normalize_pricing_entry(v)}
 
     try:
         content = MODEL_PRICING_FILE.read_text(encoding="utf-8")
@@ -58,10 +82,11 @@ def _load_model_pricing() -> Dict[str, List[float]]:
         if not isinstance(data, dict):
             raise ValueError("model_pricing must be an object")
 
-        result: Dict[str, List[float]] = {}
+        result: Dict[str, ModelPricingEntry] = {}
         for key, value in data.items():
-            if isinstance(value, list) and len(value) == 2:
-                result[str(key)] = [float(value[0]), float(value[1])]
+            entry = _normalize_pricing_entry(value)
+            if entry:
+                result[str(key)] = entry
 
         if not result:
             raise ValueError("model_pricing is empty")
@@ -73,10 +98,10 @@ def _load_model_pricing() -> Dict[str, List[float]]:
             json.dumps(DEFAULT_MODEL_PRICING, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return DEFAULT_MODEL_PRICING.copy()
+        return {k: _normalize_pricing_entry(v) for k, v in DEFAULT_MODEL_PRICING.items() if _normalize_pricing_entry(v)}
 
 
-model_pricing: Dict[str, List[float]] = _load_model_pricing()
+model_pricing: Dict[str, ModelPricingEntry] = _load_model_pricing()
 available_models: List[str] = list(model_pricing.keys())
 
 
@@ -291,6 +316,26 @@ def _extract_text_from_chat_completions(data: Dict[str, Any]) -> str:
     return str(raw or "").strip()
 
 
+def _extract_images_from_chat_completions(data: Dict[str, Any]) -> List[str]:
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return []
+    msg = choices[0].get("message", {}) or {}
+    images = msg.get("images")
+    if not isinstance(images, list):
+        return []
+    out: List[str] = []
+    for it in images:
+        if not isinstance(it, dict):
+            continue
+        iu = it.get("image_url")
+        if isinstance(iu, dict):
+            url = iu.get("url")
+            if isinstance(url, str) and url.strip():
+                out.append(url.strip())
+    return out
+
+
 def _extract_usage_tokens_from_chat_completions(data: Dict[str, Any]) -> Tuple[int, int]:
     usage = data.get("usage", {}) or {}
     pt = usage.get("prompt_tokens", 0) or 0
@@ -346,8 +391,19 @@ def _make_user_message(user_text: Optional[str], image_data_uris: Optional[List[
     return {"role": "user", "content": parts}
 
 
+def _get_model_kind(model: str) -> ModelKind:
+    entry = model_pricing.get(model)
+    if not entry:
+        return "t"
+    return entry[2]
+
+
 def _calc_cost(model: str, prompt_tokens: int, completion_tokens: int) -> Tuple[float, float, float]:
-    price_per_1m_input, price_per_1m_output = model_pricing.get(model, [0.0, 0.0])
+    entry = model_pricing.get(model)
+    if not entry:
+        price_per_1m_input, price_per_1m_output = 0.0, 0.0
+    else:
+        price_per_1m_input, price_per_1m_output = entry[0], entry[1]
     cost_input = (prompt_tokens / 10**6) * float(price_per_1m_input)
     cost_output = (completion_tokens / 10**6) * float(price_per_1m_output)
     return cost_input, cost_output, cost_input + cost_output
@@ -378,6 +434,7 @@ async def get_response(
         )
 
     model = rec.get("model", DEFAULT_MODEL_NAME)
+    model_kind = _get_model_kind(model)
     user_max_history = get_user_max_history(tg_id)
 
     user_message = _make_user_message(user_text, image_data_uris)
@@ -388,7 +445,8 @@ async def get_response(
     rec["history"] = _trim_history(rec["history"], user_max_history)
     _save_user_map(user_map)
 
-    if get_user_web_search(tg_id):
+    web_search_enabled = get_user_web_search(tg_id) and model_kind == "t"
+    if web_search_enabled:
         payload = {
             "model": model,
             "input": _history_to_responses_text(rec["history"]),
@@ -405,10 +463,10 @@ async def get_response(
                 )
         except httpx.TimeoutException as exc:
             logger.error("OpenRouter timeout: %s", exc)
-            return "OpenRouter timeout\\. Try again later"
+            return "OpenRouter timeout. Try again later"
         except httpx.HTTPError as exc:
             logger.error("OpenRouter network error: %s", exc)
-            return "OpenRouter network error\\. Try again later"
+            return "OpenRouter network error. Try again later"
 
         if response.status_code >= 400:
             try:
@@ -429,7 +487,7 @@ async def get_response(
             snippet = (response.text or "")[:500]
             ctype = response.headers.get("content-type", "")
             logger.error(
-                "Invalid JSON from OpenRouter (%s, %s)\\. First 500 chars: %r",
+                "Invalid JSON from OpenRouter (%s, %s). First 500 chars: %r",
                 response.status_code,
                 ctype,
                 snippet,
@@ -439,7 +497,7 @@ async def get_response(
         content = _extract_text_from_responses(data)
         if not content:
             logger.error("OpenRouter responses empty text: %s", json.dumps(data)[:800])
-            return "OpenRouter returned empty response\\. Please try again"
+            return "OpenRouter returned empty response. Please try again"
 
         prompt_tokens, completion_tokens = _extract_usage_tokens_from_responses(data)
         cost_input, cost_output, total_cost = _calc_cost(model, prompt_tokens, completion_tokens)
@@ -455,10 +513,13 @@ async def get_response(
             f"Total cost: ${total_cost:.6f}"
         )
 
-    payload2 = {
+    payload2: Dict[str, Any] = {
         "model": model,
         "messages": rec["history"],
     }
+
+    if model_kind == "i":
+        payload2["modalities"] = ["image", "text"]
 
     try:
         async with httpx.AsyncClient(timeout=OPENROUTER_TIMEOUT) as client:
@@ -469,7 +530,7 @@ async def get_response(
             )
     except httpx.TimeoutException as exc:
         logger.error("OpenRouter timeout: %s", exc)
-        return "OpenRouter timeout\\. Try again later"
+        return "OpenRouter timeout. Try again later"
     except httpx.HTTPError as exc:
         logger.error("OpenRouter network error: %s", exc)
         return "OpenRouter network error\\. Try again later"
@@ -493,27 +554,36 @@ async def get_response(
         snippet2 = (response2.text or "")[:500]
         ctype2 = response2.headers.get("content-type", "")
         logger.error(
-            "Invalid JSON from OpenRouter (%s, %s)\\. First 500 chars: %r",
+            "Invalid JSON from OpenRouter (%s, %s). First 500 chars: %r",
             response2.status_code,
             ctype2,
             snippet2,
         )
-        return "OpenRouter returned an unexpected response\\. Please try again"
+        return "OpenRouter returned an unexpected response. Please try again"
 
     content2 = _extract_text_from_chat_completions(data2)
-    if not content2:
-        logger.error("OpenRouter chat empty text: %s", json.dumps(data2)[:800])
-        return "OpenRouter returned empty response\\. Please try again"
+    images2 = _extract_images_from_chat_completions(data2) if model_kind == "i" else []
+
+    if not content2 and not images2:
+        logger.error("OpenRouter chat empty text/images: %s", json.dumps(data2)[:800])
+        return "OpenRouter returned empty response. Please try again"
 
     prompt_tokens2, completion_tokens2 = _extract_usage_tokens_from_chat_completions(data2)
     cost_input2, cost_output2, total_cost2 = _calc_cost(model, prompt_tokens2, completion_tokens2)
 
-    rec["history"].append({"role": "assistant", "content": content2})
-    rec["history"] = _trim_history(rec["history"], user_max_history)
-    _save_user_map(user_map)
+    if content2:
+        rec["history"].append({"role": "assistant", "content": content2})
+        rec["history"] = _trim_history(rec["history"], user_max_history)
+        _save_user_map(user_map)
+
+    images_block = ""
+    if images2:
+        images_block = "\n\n".join([f"Image {i+1}: {u}" for i, u in enumerate(images2)])
+
+    body = "\n\n".join([p for p in [content2, images_block] if p]).strip()
 
     return (
-        f"{content2}\n\n---\n"
+        f"{body}\n\n---\n"
         f"Input cost: ${cost_input2:.6f}\n"
         f"Output cost: ${cost_output2:.6f}\n"
         f"Total cost: ${total_cost2:.6f}"
